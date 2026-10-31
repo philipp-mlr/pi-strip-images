@@ -1,0 +1,30 @@
+{
+  "name": "pi-strip-images",
+  "version": "0.1.0",
+  "description": "pi extension: strip image blocks from model context so image-bearing conversations keep working on text-only models",
+  "keywords": [
+    "pi-package"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "repository": "github:philipp-mlr/pi-strip-images",
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": "*",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}
