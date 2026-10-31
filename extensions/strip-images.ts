@@ -37,13 +37,26 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// turn_end fires on every finished turn, INCLUDING failed runs. Only
-	// consume staging on completed turns (mid-run cleanup); on error runs
-	// staging must survive until agent_before_settle, the only boundary where
-	// a continuation request is actually runnable.
 	pi.on("turn_end", (event, ctx) => {
 		if (event.outcome !== "completed") return;
 		return applyStaged(ctx, false);
 	});
-	pi.on("agent_before_settle", (event, ctx) => applyStaged(ctx, event.outcome === "error"));
+	pi.on("agent_before_settle", (event, ctx) => {
+		if (event.outcome !== "error") return applyStaged(ctx, false);
+		// Failed run: only act when we actually staged edits (never retry
+		// unrelated provider errors). pi persists the failed assistant attempt;
+		// a continuation request cannot end on an assistant message, so it must
+		// be omitted too — mirroring pi's own overflow recovery.
+		const applied = applyStaged(ctx, true);
+		if (!applied) return undefined;
+		const entries = [...(applied.entries ?? [])];
+		const leaf = ctx.sessionManager.getLeafEntry();
+		if (leaf?.type === "message") {
+			const message = (leaf as { message?: { role?: string; stopReason?: string } }).message;
+			if (message?.role === "assistant" && message.stopReason === "error") {
+				entries.push({ type: "context_edit", targetId: leaf.id, replacement: null });
+			}
+		}
+		return { entries, continue: true };
+	});
 }
