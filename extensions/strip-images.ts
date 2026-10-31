@@ -9,16 +9,14 @@ function countPlaceholders(target: ImageTarget): number {
 	return target.replacement.content.filter((block) => block.text.startsWith("[image removed:")).length;
 }
 
-function applyStaged(ctx: ExtensionContext, outcome: string): BoundaryResult | undefined {
+function applyStaged(ctx: ExtensionContext, allowContinue: boolean): BoundaryResult | undefined {
 	if (staging.size === 0) return;
 	const contextEntryIds = new Set(ctx.sessionManager.buildContextEntries().map((entry) => entry.id));
 	const drafts = buildDrafts(staging, contextEntryIds);
 	staging.clear();
 	if (drafts.length === 0) return;
 	ctx.ui.notify(`strip-images: applied ${drafts.length} context edit(s)`, "info");
-	// Only a failed run needs the forced retry; on success the edits land
-	// silently and the next request is already clean.
-	return { entries: drafts, continue: outcome === "error" };
+	return { entries: drafts, continue: allowContinue };
 }
 
 export default function (pi: ExtensionAPI) {
@@ -39,6 +37,13 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	pi.on("turn_end", (event, ctx) => applyStaged(ctx, event.outcome));
-	pi.on("agent_before_settle", (event, ctx) => applyStaged(ctx, event.outcome));
+	// turn_end fires on every finished turn, INCLUDING failed runs. Only
+	// consume staging on completed turns (mid-run cleanup); on error runs
+	// staging must survive until agent_before_settle, the only boundary where
+	// a continuation request is actually runnable.
+	pi.on("turn_end", (event, ctx) => {
+		if (event.outcome !== "completed") return;
+		return applyStaged(ctx, false);
+	});
+	pi.on("agent_before_settle", (event, ctx) => applyStaged(ctx, event.outcome === "error"));
 }
