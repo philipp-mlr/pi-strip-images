@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
-import { findImageTargets, buildDrafts } from "../extensions/lib.js";
+import { findImageTargets, buildDrafts, boundaryResult, hasProjectedImage } from "../extensions/lib.js";
+import type { ContextEditEntryDraft } from "@earendil-works/pi-coding-agent";
 
 // Minimal structural fixtures cast to SessionEntry — lib.ts only reads
 // type/id and content blocks at runtime.
@@ -96,5 +97,65 @@ describe("buildDrafts", () => {
 			targetId: "u1",
 			replacement: { content: [txt("[image removed: image/png]")] },
 		});
+	});
+});
+
+describe("boundaryResult", () => {
+	const leaf = (id: string, role: string, stopReason?: string): SessionEntry =>
+		({
+			type: "message", id, ...base,
+			message: { role, content: [{ type: "text", text: "x" }], stopReason, timestamp: 0 },
+		}) as unknown as SessionEntry;
+	const drafts: ContextEditEntryDraft[] = [
+		{ type: "context_edit", targetId: "u1", replacement: { content: [txt("p")] } },
+	];
+
+	it("completed: applies drafts, never continues", () => {
+		expect(boundaryResult("completed", drafts, undefined)).toEqual({ entries: drafts, continue: false });
+	});
+
+	it("aborted: applies drafts, never continues", () => {
+		expect(boundaryResult("aborted", drafts, undefined)).toEqual({ entries: drafts, continue: false });
+	});
+
+	it("error with assistant-error leaf: drafts + omission edit + continue", () => {
+		const result = boundaryResult("error", drafts, leaf("fb1", "assistant", "error"))!;
+		expect(result.continue).toBe(true);
+		expect(result.entries).toHaveLength(2);
+		expect(result.entries![1]).toEqual({ type: "context_edit", targetId: "fb1", replacement: null });
+		
+	});
+
+	it("error with non-assistant leaf: drafts + continue, no omission", () => {
+		const result = boundaryResult("error", drafts, leaf("u9", "user"))!;
+		expect(result.continue).toBe(true);
+		expect(result.entries).toEqual(drafts);
+	});
+
+	it("error without drafts: nothing", () => {
+		expect(boundaryResult("error", [], leaf("fb1", "assistant", "error"))).toBeUndefined();
+	});
+
+	it("completed without drafts: nothing", () => {
+		expect(boundaryResult("completed", [], undefined)).toBeUndefined();
+	});
+});
+
+describe("hasProjectedImage", () => {
+	it("true when projected messages still contain an image block", () => {
+		const messages = [{ role: "user", content: [{ type: "text", text: "a" }, img()] }];
+		expect(hasProjectedImage(messages)).toBe(true);
+	});
+
+	it("false when images were already replaced by placeholders", () => {
+		const messages = [
+			{ role: "user", content: [{ type: "text", text: "a" }, { type: "text", text: "[image removed: image/png]" }] },
+			{ role: "toolResult", content: [{ type: "text", text: "[image removed: tool result from read]" }] },
+		];
+		expect(hasProjectedImage(messages)).toBe(false);
+	});
+
+	it("false for string content", () => {
+		expect(hasProjectedImage([{ role: "user", content: "plain" }])).toBe(false);
 	});
 });

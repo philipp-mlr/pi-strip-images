@@ -1,6 +1,5 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { BoundaryResult } from "@earendil-works/pi-coding-agent";
-import { buildDrafts, findImageTargets, type ImageTarget } from "./lib.js";
+import type { AgentActivityOutcome, BoundaryResult, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { boundaryResult, buildDrafts, findImageTargets, hasProjectedImage, type ImageTarget } from "./lib.js";
 
 /** Entry-id keyed staging; a second /strip-images overwrites in place (idempotent). */
 const staging = new Map<string, ImageTarget>();
@@ -9,21 +8,33 @@ function countPlaceholders(target: ImageTarget): number {
 	return target.replacement.content.filter((block) => block.text.startsWith("[image removed:")).length;
 }
 
-function applyStaged(ctx: ExtensionContext, allowContinue: boolean): BoundaryResult | undefined {
+function applyStaged(ctx: ExtensionContext, outcome: AgentActivityOutcome): BoundaryResult | undefined {
 	if (staging.size === 0) return;
-	const contextEntryIds = new Set(ctx.sessionManager.buildContextEntries().map((entry) => entry.id));
+	const contextEntries = ctx.sessionManager.buildContextEntries();
+	const contextEntryIds = new Set(contextEntries.map((entry) => entry.id));
 	const drafts = buildDrafts(staging, contextEntryIds);
 	staging.clear();
-	if (drafts.length === 0) return;
-	ctx.ui.notify(`strip-images: applied ${drafts.length} context edit(s)`, "info");
-	return { entries: drafts, continue: allowContinue };
+	const lastMessageEntry = contextEntries.findLast((entry) => entry.type === "message");
+	const result = boundaryResult(outcome, drafts, lastMessageEntry);
+	if (result) ctx.ui.notify(`strip-images: applied ${drafts.length} context edit(s)`, "info");
+	return result;
 }
 
 export default function (pi: ExtensionAPI) {
 	pi.registerCommand("strip-images", {
 		description: "Strip image blocks from model context (placeholder text, raw history untouched)",
 		handler: async (_args, ctx) => {
-			const targets = findImageTargets(ctx.sessionManager.buildContextEntries());
+			// Only stage entries whose *projected* content still contains an
+			// image — an earlier strip (ours, another extension, or a manual
+			// edit) must not be re-staged or overwritten.
+			const projection = ctx.sessionManager.buildSessionProjection();
+			const strippable = new Set<string>();
+			for (const projected of projection.entries) {
+				if (hasProjectedImage(projected.messages)) strippable.add(projected.sourceEntry.id);
+			}
+			const targets = findImageTargets(ctx.sessionManager.buildContextEntries()).filter((target) =>
+				strippable.has(target.entryId),
+			);
 			if (targets.length === 0) {
 				ctx.ui.notify("strip-images: no images found in current context", "warning");
 				return;
@@ -37,26 +48,13 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	// turn_end fires on every finished turn, INCLUDING failed runs. Only
+	// consume staging on completed turns (mid-run cleanup); on error runs
+	// staging must survive until agent_before_settle, the only boundary where
+	// a continuation request is actually runnable.
 	pi.on("turn_end", (event, ctx) => {
 		if (event.outcome !== "completed") return;
-		return applyStaged(ctx, false);
+		return applyStaged(ctx, event.outcome);
 	});
-	pi.on("agent_before_settle", (event, ctx) => {
-		if (event.outcome !== "error") return applyStaged(ctx, false);
-		// Failed run: only act when we actually staged edits (never retry
-		// unrelated provider errors). pi persists the failed assistant attempt;
-		// a continuation request cannot end on an assistant message, so it must
-		// be omitted too — mirroring pi's own overflow recovery.
-		const applied = applyStaged(ctx, true);
-		if (!applied) return undefined;
-		const entries = [...(applied.entries ?? [])];
-		const leaf = ctx.sessionManager.getLeafEntry();
-		if (leaf?.type === "message") {
-			const message = (leaf as { message?: { role?: string; stopReason?: string } }).message;
-			if (message?.role === "assistant" && message.stopReason === "error") {
-				entries.push({ type: "context_edit", targetId: leaf.id, replacement: null });
-			}
-		}
-		return { entries, continue: true };
-	});
+	pi.on("agent_before_settle", (event, ctx) => applyStaged(ctx, event.outcome));
 }

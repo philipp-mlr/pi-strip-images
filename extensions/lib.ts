@@ -1,5 +1,5 @@
 import type { TextContent } from "@earendil-works/pi-ai";
-import type { ContextEditEntryDraft, SessionEntry } from "@earendil-works/pi-coding-agent";
+import type { AgentActivityOutcome, BoundaryResult, ContextEditEntryDraft, SessionEntry } from "@earendil-works/pi-coding-agent";
 
 export type ImageTarget = {
 	entryId: string;
@@ -66,6 +66,46 @@ export function findImageTargets(entries: SessionEntry[]): ImageTarget[] {
 		}
 	}
 	return targets;
+}
+
+/**
+ * True when any projected (model-visible) message still carries an image
+ * block — i.e. this entry has not been stripped by an earlier context edit.
+ */
+export function hasProjectedImage(messages: unknown[]): boolean {
+	return messages.some((message) => {
+		const content = (message as { content?: unknown } | undefined)?.content;
+		return Array.isArray(content) && content.some((block) => (block as { type?: string })?.type === "image");
+	});
+}
+
+/**
+ * Decide the boundary result for staged edits.
+ *
+ * - `error`: pi persists the failed assistant attempt, and a continuation
+ *   request cannot end on an assistant message — omit it (mirrors pi's own
+ *   overflow recovery) and continue for one clean retry.
+ * - `completed`/`aborted`: land the edits, never continue (no duplicate
+ *   responses).
+ * - No drafts: stay out entirely (never retry unrelated provider errors).
+ */
+export function boundaryResult(
+	outcome: AgentActivityOutcome,
+	drafts: ContextEditEntryDraft[],
+	lastMessageEntry: SessionEntry | undefined,
+): BoundaryResult | undefined {
+	if (drafts.length === 0) return undefined;
+	if (outcome === "error") {
+		const entries = [...drafts];
+		const message = lastMessageEntry
+			? (lastMessageEntry as { message?: { role?: string; stopReason?: string } }).message
+			: undefined;
+		if (lastMessageEntry && message?.role === "assistant" && message.stopReason === "error") {
+			entries.push({ type: "context_edit", targetId: lastMessageEntry.id, replacement: null });
+		}
+		return { entries, continue: true };
+	}
+	return { entries: drafts, continue: false };
 }
 
 /**
